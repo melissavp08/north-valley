@@ -216,6 +216,13 @@ dialog.nvdlg::backdrop{background:var(--overlay)}
 .chk input{width:16px;height:16px;accent-color:#D97A45}
 .hint2{font-size:12px;color:var(--muted)}
 
+.gf select,.gf textarea{width:100%;border:1px solid #E2E6E9;border-radius:10px;padding:10px 12px;font:inherit;font-size:14px;background:#FFFFFF;color:#182837}
+.gf select{height:42px;padding:0 10px}
+.gf textarea{resize:vertical;min-height:84px}
+.gf select:focus,.gf textarea:focus{outline:2px solid #D97A45;outline-offset:1px;border-color:#D97A45}
+.gfoot .glink{font-size:12.5px;margin-bottom:6px}
+#gView>.gbtn+.gbtn{margin-top:-6px}
+
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.min.js"></script>
 </head>
@@ -249,7 +256,7 @@ dialog.nvdlg::backdrop{background:var(--overlay)}
   <div class="gate-card">
     <div class="gate-brand"><span class="mark">NV</span><div><b>North Valley</b><small>CRM · Tickets y tareas</small></div></div>
     <div id="gView"></div>
-    <div class="gfoot">Un solo acceso para el CRM y Tickets y tareas.</div>
+    <div class="gfoot"><button type="button" class="glink" id="gRep">¿Problemas para entrar? Avisar a TI</button><br>Un solo acceso para el CRM y Tickets y tareas.</div>
   </div>
 </div>
 <dialog class="nvdlg" id="acctDlg" aria-labelledby="acctDlgT">
@@ -697,7 +704,7 @@ show("crm");renderPar();
 })();
 }
 /* ---------- sign-in gate (Supabase) ---------- */
-let booted=false, recovering=false, entering=false;
+let booted=false, recovering=false, entering=false, lastErr=null, lastMail="";
 const HERE=location.origin+location.pathname;
 const gMsg=(t,k)=>{const m=$("gMsg");if(m){m.className="gmsg"+(k?" "+k:"");m.textContent=t||""}};
 const busy=(b,on,txt)=>{if(!b)return;if(on){b.dataset.t=b.textContent;b.textContent=txt||"Un momento…";b.disabled=true}else{b.textContent=b.dataset.t||b.textContent;b.disabled=false}};
@@ -705,11 +712,15 @@ const ERR=e=>{const m=String(e&&e.message||e||"");
   if(/invalid login credentials/i.test(m))return "Correo o contraseña incorrectos.";
   if(/email not confirmed/i.test(m))return "Primero confirma tu correo: abre el mensaje que te enviamos al crear la cuenta.";
   if(/password should be at least|at least \d+ char/i.test(m))return "La contraseña debe tener al menos 8 caracteres.";
+  if(/email rate limit/i.test(m))return "Se alcanzó el límite de correos de confirmación por hora. Inténtalo más tarde o avisa a TI.";
   if(/rate limit|too many|security purposes/i.test(m))return "Demasiados intentos seguidos. Espera un minuto y vuelve a intentarlo.";
+  if(/signups? not allowed|signup is disabled/i.test(m))return "El registro de cuentas está desactivado. Avisa a TI.";
+  if(/invalid.*email|unable to validate email/i.test(m))return "Ese correo no parece válido. Revísalo.";
   if(/already registered|already been registered/i.test(m))return "Ese correo ya tiene cuenta. Entra o recupera tu contraseña.";
   if(/fetch|network/i.test(m))return "No hay conexión. Revisa tu internet e inténtalo otra vez.";
   return m||"Algo salió mal. Inténtalo otra vez."};
 const field=(id,label,type,ac,extra)=>`<label class="gf"><span>${label}</span><input id="${id}" type="${type}" autocomplete="${ac}" required ${extra||""}></label>`;
+const KINDS=["No pude crear mi cuenta","No pude iniciar sesión","No me llegó el correo de confirmación","No puedo recuperar mi contraseña","Dice que no tengo acceso","Otro"];
 function gview(v,note,kind){
   const sb=SUPA.sb, V=$("gView");$("gate").hidden=false;
   const views={
@@ -730,11 +741,23 @@ function gview(v,note,kind){
       <form class="gform" id="gForm">${field("gPw","Nueva contraseña (mínimo 8)","password","new-password",'minlength="8"')}${field("gPw2","Repítela","password","new-password",'minlength="8"')}
       <div class="gmsg" id="gMsg" role="status"></div><button class="gbtn" type="submit">Guardar y entrar</button></form>`,
     noaccess:()=>`<h1>Tu cuenta aún no tiene acceso</h1><p class="lead">Entraste como <b>${esc(note||"")}</b>, pero ese correo no está en la lista del equipo. Pide a quien administra North Valley que te agregue y vuelve a entrar.</p>
-      <button class="gbtn sec" type="button" id="gOut">Cerrar sesión</button>`
+      <button class="gbtn" type="button" data-g="report">Avisar a TI</button><button class="gbtn sec" type="button" id="gOut">Cerrar sesión</button>`,
+    report:()=>`<h1>Avisar a TI</h1><p class="lead">Se creará un ticket en Tickets y tareas con la fecha y hora de este aviso para que TI le dé seguimiento.</p>
+      <form class="gform" id="gForm">${field("gMail","Tu correo","email","email",'inputmode="email"')}
+      <label class="gf"><span>¿Qué pasó?</span><select id="gKind" required>${KINDS.map(k=>`<option${lastErr&&lastErr.kind===k?" selected":""}>${k}</option>`).join("")}</select></label>
+      <label class="gf"><span>Detalles (opcional)</span><textarea id="gDet" rows="3" maxlength="2000" placeholder="Qué intentaste y qué viste en pantalla"></textarea></label>
+      ${lastErr?`<div class="gmsg">Se adjuntará el último error que viste: <b>${esc(lastErr.shown)}</b></div>`:""}
+      <div class="gmsg" id="gMsg" role="status"></div><button class="gbtn" type="submit">Enviar aviso</button></form>
+      <div class="glinks"><button type="button" data-g="${booted?"login":"login"}">Volver a iniciar sesión</button></div>`,
+    sent:()=>`<h1>Aviso enviado</h1><div class="gmsg ok">Tu reporte quedó registrado como <b style="white-space:nowrap">${esc(note.folio)}</b> el <b style="white-space:nowrap">${esc(note.at)}</b> (hora del centro de México). TI le dará seguimiento y te contactará a ${esc(note.mail)}.</div>
+      <div class="glinks"><button type="button" data-g="login">Volver a iniciar sesión</button></div>`
   };
   V.innerHTML=views[v]();
-  if(v!=="noaccess"&&note)gMsg(note,kind);
-  V.querySelectorAll("[data-g]").forEach(b=>b.onclick=()=>{const m=$("gMail")&&$("gMail").value;gview(b.dataset.g);if(m&&$("gMail"))$("gMail").value=m});
+  const rl=$("gRep");if(rl)rl.hidden=v==="report"||v==="loading"||v==="sent"||v==="noaccess";
+  if(v==="noaccess")lastMail=note||lastMail;
+  if(typeof note==="string"&&v!=="noaccess"&&note)gMsg(note,kind);
+  if(v==="report"&&$("gMail"))$("gMail").value=lastMail;
+  V.querySelectorAll("[data-g]").forEach(b=>b.onclick=()=>{const m=$("gMail")&&$("gMail").value;if(m)lastMail=m;gview(b.dataset.g);if(lastMail&&$("gMail")&&!$("gMail").value)$("gMail").value=lastMail});
   if($("gOut"))$("gOut").onclick=logoutSupa;
   const f=$("gForm");if(!f)return;
   const first=f.querySelector("input");if(first)setTimeout(()=>first.focus(),30);
@@ -751,9 +774,16 @@ function gview(v,note,kind){
         gview("login",`Listo. Te enviamos un correo a ${mail} para confirmar tu cuenta. Ábrelo, y después entra aquí con tu contraseña.`,"ok");if($("gMail"))$("gMail").value=mail;return}
       else if(v==="forgot"){const {error}=await sb.auth.resetPasswordForEmail(mail,{redirectTo:HERE});if(error)throw error;
         gMsg(`Si ${mail} tiene cuenta, te llegará un enlace para crear una nueva contraseña.`,"ok")}
+      else if(v==="report"){const kindV=$("gKind").value,det=$("gDet").value.trim();
+        const err=lastErr?(lastErr.shown+(lastErr.raw&&lastErr.raw!==lastErr.shown?" ("+lastErr.raw+")":"")):"";
+        const {data,error}=await sb.rpc("nv_report_access",{p_email:mail,p_kind:kindV,p_detail:det,p_error:err,p_agent:navigator.userAgent});
+        if(error)throw error;const [folio,at]=String(data).split("|");lastErr=null;gview("sent",{folio,at,mail});return}
       else if(v==="recover"){const {data,error}=await sb.auth.updateUser({password:pw});if(error)throw error;recovering=false;
         const s=(await sb.auth.getSession()).data.session;history.replaceState(null,"",HERE);await enter(s)}
-    }catch(er){gMsg(ERR(er),"bad")}finally{if(btn.isConnected)busy(btn,false)}};
+    }catch(er){const shown=ERR(er);lastMail=mail||lastMail;
+      lastErr={kind:{signup:"No pude crear mi cuenta",login:"No pude iniciar sesión",forgot:"No puedo recuperar mi contraseña",recover:"No puedo recuperar mi contraseña",report:lastErr&&lastErr.kind}[v]||"Otro",shown,raw:String(er&&er.message||er||"")};
+      if(v==="report"){gMsg(/too_many/.test(lastErr.raw)?"Ya enviaste varios avisos en la última hora. TI ya los tiene.":/bad_email/.test(lastErr.raw)?"Revisa tu correo: no parece válido.":shown,"bad");return}
+      gMsg(shown,"bad");const m=$("gMsg");if(m){const a=document.createElement("button");a.type="button";a.className="glink";a.textContent="Avisar a TI";a.style.marginLeft="6px";a.onclick=()=>gview("report");m.append(" ",a)}}finally{if(btn.isConnected)busy(btn,false)}};
 }
 async function enter(session){
   if(!session||booted||entering)return;entering=true;try{return await enter2(session)}finally{entering=false}}
@@ -816,6 +846,7 @@ $("aclForm").onsubmit=async e=>{e.preventDefault();const m=$("aclMsg"),b=e.targe
 $("acl").addEventListener("click",async e=>{const b=e.target.closest("[data-rm]");if(!b)return;
   if(b.dataset.armed!=="1"){b.dataset.armed="1";b.textContent="¿Seguro?";setTimeout(()=>{if(b.isConnected){b.dataset.armed="";b.textContent="Quitar"}},3500);return}
   b.disabled=true;const {error}=await SUPA.sb.from("allowed").delete().eq("email",b.dataset.rm);if(error){$("aclMsg").className="gmsg bad";$("aclMsg").textContent=ERR(error)}loadAcl()});
+$("gRep").onclick=()=>gview("report");
 
 if(SUPA)gateStart();else boot();
 })();
